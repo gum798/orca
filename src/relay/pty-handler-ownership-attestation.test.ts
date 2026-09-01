@@ -96,6 +96,38 @@ describe('PtyHandler publishes host-attested PTY ownership', () => {
     expect(entry).not.toHaveProperty('ownerClientInstanceId')
   })
 
+  it('never attests a revived PTY, so a restored session is not sweepable', async () => {
+    // The load-bearing invariant of #9819's host half, and the one most likely to be "helpfully"
+    // broken later: revive replays state a client serialized, which is not this host observing who
+    // asked for the shell. A revived PTY *does* get paneBound: true (paneKey is restored) and a
+    // fresh createdAt, so the omitted attestation is the only thing standing between a relay
+    // restart and a sweep of the entire restored session.
+    const revivedId = 'pty-revived-1'
+    await dispatcher.callRequest(
+      'pty.revive',
+      {
+        state: JSON.stringify([
+          {
+            id: revivedId,
+            pid: process.pid,
+            cwd: process.cwd(),
+            paneKey: PANE_KEY,
+            cols: 80,
+            rows: 24
+          }
+        ])
+      },
+      { clientId: 7, isStale: () => false } as never
+    )
+
+    const entry = (await listProcesses()).find((process) => process.id === revivedId)
+    expect(entry, 'revive should have produced a live PTY entry').toBeDefined()
+    // paneBound is true, which is exactly why the missing attestation has to be asserted:
+    // every other sweep precondition is satisfied by a revived pane.
+    expect(entry?.paneBound).toBe(true)
+    expect(entry?.ownerClientInstanceId).toBeUndefined()
+  })
+
   it('reports a bare shell as not pane-bound', async () => {
     const { id } = await spawnFrom(7, {})
 
