@@ -26,6 +26,10 @@ import {
 } from './fs-path-mutation-requests'
 import { buildExcludePathPrefixes } from '../shared/quick-open-filter'
 import { resolveQuickOpenResultLimit } from '../shared/quick-open-listing-limits'
+import {
+  listFilesUndeliverableReason,
+  QUICK_OPEN_LISTING_UNCAPPED_SCAN_LIMIT
+} from './fs-list-files-response-budget'
 import { readRelayFileContent, readRelayFileStreamMetadata } from './fs-handler-file-read'
 import { readRelayFileRange } from './fs-handler-file-range'
 import { FileRangeReadRequestError } from '../shared/file-range-read'
@@ -220,7 +224,13 @@ export class FsHandler {
       params.maxResults > 0
         ? params.maxResults
         : undefined
-    const maxResults = resolveQuickOpenResultLimit(requestedMaxResults)
+    // Why: an uncapped scan is bounded by what the host can retain, not by the page size a
+    // client would have asked for — the byte budget below decides what is deliverable, and a
+    // workspace of short paths should not be cut at a row count a deep monorepo shares.
+    const maxResults =
+      requestedMaxResults === undefined
+        ? QUICK_OPEN_LISTING_UNCAPPED_SCAN_LIMIT
+        : resolveQuickOpenResultLimit(requestedMaxResults)
     const searchQuery =
       typeof params.searchQuery === 'string' && params.searchQuery.trim().length > 0
         ? params.searchQuery
@@ -240,16 +250,12 @@ export class FsHandler {
       start: (signal) =>
         runListFilesScan(rootPath, excludePathPrefixes, signal, maxResults, searchQuery)
     })
-    // Why: a client that named no limit reads the array as the whole listing, and clients that
-    // predate `maxResults` on this call hardcode `truncated: false` — handing them the prefix shows
-    // a partial tree as a complete one, with no wire change for them to notice (remote wire
-    // compatibility, rule 3). The verdict each caller gets is its own, so coalescing is unaffected.
-    // Failing here is the same choice the readdir walker already makes: silent truncation is worse
-    // than an explicit error.
-    if (requestedMaxResults === undefined && files.length >= maxResults) {
-      throw new Error(
-        `This workspace has more than ${maxResults - 1} files. Update Orca on this device so it can request a bounded page, or open a narrower folder — the host will not return a partial listing as if it were complete.`
-      )
+    // Why: truncation the client cannot see has to be an error (remote wire compatibility, rule 3);
+    // the verdict each caller gets is its own, so coalescing is unaffected. Failing here is the same
+    // choice the readdir walker already makes: silent truncation is worse than an explicit error.
+    const undeliverable = listFilesUndeliverableReason(files, requestedMaxResults, maxResults)
+    if (undeliverable) {
+      throw new Error(undeliverable)
     }
     return files
   }
