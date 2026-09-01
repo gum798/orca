@@ -727,6 +727,8 @@ function uploadStageNamespaceIfSupported(
 
 const NODE_PTY_VERSION = '1.1.0'
 const NODE_PTY_CONSOLE_LIST_PATCH_FILENAME = 'node-pty-1.1.0-console-list-agent-patch.cjs'
+const NODE_PTY_MASTER_CLOEXEC_PATCH_FILENAME = 'node-pty-1.1.0-master-cloexec-patch.cjs'
+const NODE_PTY_CLOEXEC_STATUS_PREFIX = 'ORCA-NPTY-CLOEXEC:'
 // Exported for the relay-native-dependency-coverage test, which asserts every
 // native addon the relay bundle imports is either installed here or explicitly
 // declared as degrading without it.
@@ -1213,6 +1215,15 @@ async function installNativeDeps(
     }
   }
 
+  // Why this precedes promotion: the patch renames `node-pty/build/Release`, runs `npm rebuild`
+  // and rolls back inside `node_modules`, and promotion turns that directory into a symlink to a
+  // published -- and by contract immutable -- shared cache entry. Patching afterwards would write
+  // through the link, and `.deps-complete` would already have published an unpatched tree that
+  // every later host links and skips.
+  if (probe.available) {
+    await applyNodePtyMasterCloexecPatch(conn, remoteDir, platform, hostPlatform, nodePath, signal)
+  }
+
   // Why promotion is gated on the probe and not on npm's exit code: an entry is shared, so the
   // only evidence worth publishing is this host having loaded both addons out of that tree.
   if (probe.available && cacheContext && cache) {
@@ -1223,6 +1234,58 @@ async function installNativeDeps(
   if (!probe.available) {
     console.warn(
       `[ssh-relay][NPTY-MISSING] native deps installed but require() failed at ${remoteDir} (${platform}). stdout=${probe.output.trim().slice(-200)} stderr=${probe.stderr.trim().slice(-500)}`
+    )
+  }
+}
+
+/**
+ * Re-apply the pty-master FD_CLOEXEC patch the app gets from pnpm to the host's npm copy (#17915).
+ *
+ * Why it is safe to rebuild under a live relay: this only runs from installNativeDeps, so only on a
+ * freshly created directory or a locked repair, and a relay already serving PTYs has pty.node mapped
+ * -- replacing the file on disk does not touch the running process. It keeps the build it started
+ * with and picks up the patched one when it restarts.
+ *
+ * Why it is bounded: the remote script attempts the compile at most once per relay directory, and
+ * the directory is content-hashed over the relay manifest -- so at most one compile per bundle.
+ */
+async function applyNodePtyMasterCloexecPatch(
+  conn: SshConnection,
+  remoteDir: string,
+  platform: RelayPlatform,
+  hostPlatform: RemoteHostPlatform,
+  nodePath: string,
+  signal?: AbortSignal
+): Promise<void> {
+  // Linux is the only relay platform that takes forkpty()'s no-O_CLOEXEC path; macOS and Windows
+  // ship prebuilds, so forcing a rebuild there would add a first compile to fix nothing.
+  if (isWindowsRemoteHost(hostPlatform) || !platform.startsWith('linux')) {
+    return
+  }
+  try {
+    const command = commandWithNodePath(
+      hostPlatform,
+      nodePath,
+      remoteDir,
+      `${shellEscape(nodePath)} ${shellEscape(NODE_PTY_MASTER_CLOEXEC_PATCH_FILENAME)} 2>&1`
+    )
+    const output = await execHostCommand(conn, hostPlatform, command, {
+      timeoutMs: NATIVE_DEPS_COMMAND_TIMEOUT_MS,
+      signal
+    })
+    const status =
+      output
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .find((line) => line.startsWith(NODE_PTY_CLOEXEC_STATUS_PREFIX))
+        ?.slice(NODE_PTY_CLOEXEC_STATUS_PREFIX.length) ?? 'no-status'
+    console.log(`[ssh-relay][NPTY-CLOEXEC] ${remoteDir} (${platform}): ${status}`)
+  } catch (err) {
+    signal?.throwIfAborted()
+    // Never fatal: the script restores the working build itself, and a leaky relay beats none. An
+    // interrupted rebuild leaves node-pty unloadable, which the existing repair path reinstalls.
+    console.warn(
+      `[ssh-relay][NPTY-CLOEXEC-FAIL] pty master cloexec patch failed at ${remoteDir} (${platform}): ${(err as Error).message}`
     )
   }
 }
