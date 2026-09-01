@@ -197,6 +197,13 @@ type ManagedPty = {
   startupIngressIntent?: ReturnType<typeof parsePtyStartupIngressIntent>
   ownerBackend: PtyOwnerBackend
   agentSessionOwners?: AgentSessionOwnerBinding[]
+  /** Host clock, host-relative only: published as an age so no client has to trust our wall clock. */
+  createdAt: number
+  /** The authenticated consumer identity that asked this host to create this PTY, read from the
+   *  live grant rather than from a spawn parameter. Absent whenever the host could not attest one
+   *  (no consumer session, or a revive replaying state some other client serialized), and absence
+   *  must never be read as "nobody owns it". */
+  ownerClientInstanceId?: string
 }
 
 type RelayAgentSessionCreateResult = {
@@ -376,6 +383,14 @@ type PtyProcessSummary = {
   terminalHandle?: string
   foregroundProcessEvidence?: ForegroundProcessEvidence
   agentSessionOwners?: AgentSessionOwnerBinding[]
+  /** Age on the HOST's clock. Published instead of a creation timestamp so a client with a skewed
+   *  clock cannot compute a negative or enormous age and act on it. */
+  hostAgeMs?: number
+  /** True when this PTY was spawned for an Orca pane (`ORCA_PANE_KEY`). False means a bare relay
+   *  shell. Absent from a host that predates the field — which is neither. */
+  paneBound?: boolean
+  /** See {@link ManagedPty.ownerClientInstanceId}. Omitted when this host cannot attest one. */
+  ownerClientInstanceId?: string
 }
 
 type SerializedPtyEntry = {
@@ -463,6 +478,7 @@ export class PtyHandler {
   private consumerPausedOutputPtys = new Set<string>()
   private removeLegacyCapacityListener: (() => void) | null = null
   private sourcePublication: RelayPtySourcePublication | null = null
+  private consumerIdentityResolver: ((clientId: number) => string | null) | null = null
   private lastInputAtByPty = new Map<string, number>()
   private interactiveOutputCharsByPty = new Map<string, number>()
   private pendingSpawnCount = 0
@@ -513,6 +529,12 @@ export class PtyHandler {
 
   setSourcePublication(publication: RelayPtySourcePublication): void {
     this.sourcePublication = publication
+  }
+
+  /** Supplies the authenticated client identity behind a transport connection, so a spawn can be
+   *  attributed to the consumer session that requested it. */
+  setConsumerIdentityResolver(resolve: ((clientId: number) => string | null) | null): void {
+    this.consumerIdentityResolver = resolve
   }
 
   handleSourceCreditAvailable(id: string): void {
@@ -1847,11 +1869,15 @@ export class PtyHandler {
       params.startupIngressVersion === PTY_STARTUP_INGRESS_VERSION
         ? parsePtyStartupIngressIntent(params.startupIngress)
         : undefined
+    const ownerClientInstanceId =
+      context === undefined ? null : (this.consumerIdentityResolver?.(context.clientId) ?? null)
     const managed: ManagedPty = {
       id,
       incarnationId: randomUUID(),
       pty: term,
       initialCwd: cwd,
+      createdAt: Date.now(),
+      ...(ownerClientInstanceId ? { ownerClientInstanceId } : {}),
       buffered: new RecentPtyOutputBuffer({
         preserveChunkBoundaries: false,
         limit: REPLAY_BUFFER_MAX
@@ -2427,6 +2453,11 @@ export class PtyHandler {
         incarnationId: managed.incarnationId,
         cwd: managed.initialCwd,
         title,
+        hostAgeMs: Math.max(0, Date.now() - managed.createdAt),
+        paneBound: Boolean(managed.paneKey ?? managed.attachIdentity?.paneKey),
+        ...(managed.ownerClientInstanceId
+          ? { ownerClientInstanceId: managed.ownerClientInstanceId }
+          : {}),
         ...(managed.worktreeId ? { worktreeId: managed.worktreeId } : {}),
         ...(managed.terminalHandle ? { terminalHandle: managed.terminalHandle } : {}),
         ...(foregroundProcessEvidence ? { foregroundProcessEvidence } : {}),
@@ -2600,6 +2631,10 @@ export class PtyHandler {
       incarnationId: randomUUID(),
       pty: term,
       initialCwd: entry.cwd,
+      createdAt: Date.now(),
+      // Deliberately no ownerClientInstanceId: revive replays state a client serialized, which is
+      // not this host observing who asked for the shell. Unattested means never swept.
+
       buffered: new RecentPtyOutputBuffer({
         preserveChunkBoundaries: false,
         limit: REPLAY_BUFFER_MAX

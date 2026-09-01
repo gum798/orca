@@ -7,6 +7,7 @@ import { deployAndLaunchRelay } from './ssh-relay-deploy'
 import { execCommand } from './ssh-relay-deploy-helpers'
 import { isRelayVersionMismatchError } from './ssh-relay-version-mismatch-error'
 import { replayPendingSshPtyKills } from './ssh-pending-pty-kill-replay'
+import { sweepOrphanedRelayPtys } from './ssh-orphan-relay-pty-sweep'
 import { SshChannelMultiplexer } from './ssh-channel-multiplexer'
 import { SshPtyProvider } from '../providers/ssh-pty-provider'
 import type { SshPtyAttachResult } from '../providers/ssh-pty-session-reattach'
@@ -2334,6 +2335,17 @@ export class SshRelaySession {
         Array.from(attachedLeaseIds)
       )
     }
+    // Why last: reclaiming comes first, so every PTY this connect could route to is routed before
+    // anything asks which ones are unreachable (#9819).
+    await sweepOrphanedRelayPtys({
+      targetId: this.targetId,
+      store: this.store,
+      provider: ptyProvider,
+      clientInstanceId: this.ptyConsumerClientInstanceId,
+      isSessionOwner: this.activePtyConsumerOwner() !== null,
+      routedPtyIds: ptyIds,
+      shouldContinue
+    })
   }
 
   private async reattachKnownPty(args: {
