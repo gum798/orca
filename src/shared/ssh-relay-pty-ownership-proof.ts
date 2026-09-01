@@ -1,3 +1,5 @@
+import type { ForegroundProcessEvidence } from './foreground-process-evidence'
+
 /** Which relay PTYs a client may prove it orphaned, and therefore may stop (#9819).
  *
  *  A relay PTY is a child of the detached relay daemon. Stopping one destroys a running process —
@@ -29,6 +31,11 @@ export type RelayPtyOwnershipEvidence = {
   paneBound?: boolean
   /** Non-empty when the host still advertises an adoptable agent session on this PTY. */
   agentSessionOwners?: readonly unknown[]
+  /** What the OWNING host saw in the pane on the same listing. This answers a different question
+   *  from `agentSessionOwners`: that one asks whether Orca REGISTERED an agent session here, this
+   *  one asks whether anything at all is running. A `claude` the user typed by hand registers
+   *  nothing, so only this can see it. */
+  foregroundProcessEvidence?: ForegroundProcessEvidence
 }
 
 export type RelayPtySweepContext = {
@@ -40,6 +47,15 @@ export type RelayPtySweepContext = {
   /** Every relay PTY id this client still has any route to: a live provider PTY, a lease it has
    *  not tombstoned, an id it just reattached, or a stop it has recorded and not yet delivered. */
   routedPtyIds: ReadonlySet<string>
+  /** Relay PTY ids this client holds an `expired` lease for.
+   *
+   *  Separate from {@link routedPtyIds} because it is a different fact with the same verdict: an
+   *  expired lease records that THIS CLIENT lost its handle — a pane re-leased under a new relay
+   *  id, a reattach that failed on the transport, a pane surface that is no longer in the layout.
+   *  Every one of those writers deliberately declines to stop the remote process, and client-side
+   *  absence is `unverifiable` by construction (`docs/reference/ssh-execution-boundary.md`). So an
+   *  expired lease is the record of a process left running on purpose, never a licence to kill it. */
+  expiredLeasePtyIds: ReadonlySet<string>
   /** Host-measured age a PTY must exceed. Guards a spawn that is in flight from another window of
    *  this same client and has not written its lease yet. */
   minimumHostAgeMs: number
@@ -62,6 +78,31 @@ export const RELAY_PTY_SWEEP_MIN_AGE_MS = 30_000
 /** Bounds one pass. A relay is capped at 50 PTYs, so a pass that wants to stop more than this is
  *  not reclaiming a leak — it is a disagreement about ownership, and stopping is the wrong move. */
 export const RELAY_PTY_SWEEP_MAX_PER_PASS = 8
+
+/** The host's own answer to "is anything running in this pane?". Only a positive "no" clears the
+ *  sweep; every other shape — an older host, an unreadable process table, a named foreground
+ *  process, a busy foreground group — is a reason to leave the process alone. */
+function foregroundSkipReason(evidence: ForegroundProcessEvidence | undefined): string | null {
+  if (evidence === undefined) {
+    // A host that never published it, or a Windows host where it is not collected. Absence of the
+    // observation is not the observation of absence.
+    return 'host published no foreground-process observation'
+  }
+  if (evidence.verdict !== 'live') {
+    return 'host could not observe the pane foreground process'
+  }
+  if (evidence.processName !== null) {
+    // The host named something running in the pane. It registered no agent session, which is
+    // exactly the hand-launched `claude`/`codex` case agentSessionOwners cannot see.
+    return 'host observes a named foreground process'
+  }
+  if (evidence.shellIsForeground !== true) {
+    // Either the terminal's foreground group is not the shell's (something unrecognized is
+    // running - a build, an editor, a test run), or this host predates the field.
+    return 'host does not attest an idle shell'
+  }
+  return null
+}
 
 function skipReason(
   entry: RelayPtyOwnershipEvidence,
@@ -88,6 +129,10 @@ function skipReason(
     // agent. Reaping it converts a recoverable session into a destroyed one.
     return 'host still advertises an adoptable agent session'
   }
+  const foregroundSkip = foregroundSkipReason(entry.foregroundProcessEvidence)
+  if (foregroundSkip !== null) {
+    return foregroundSkip
+  }
   if (typeof entry.hostAgeMs !== 'number' || !Number.isFinite(entry.hostAgeMs)) {
     return 'host published no age'
   }
@@ -96,6 +141,9 @@ function skipReason(
   }
   if (context.routedPtyIds.has(entry.ptyId)) {
     return 'this client still has a route to it'
+  }
+  if (context.expiredLeasePtyIds.has(entry.ptyId)) {
+    return 'this client expired its lease without ordering a stop'
   }
   return null
 }

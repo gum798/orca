@@ -25,6 +25,9 @@ export type BatchedForegroundProcessResult = {
   available: boolean
   processName: string | null
   reason?: string
+  /** Set only when the table was readable: the PTY's own shell owns the terminal's foreground
+   *  process group, so nothing is running in the pane. Left absent when we could not observe it. */
+  shellIsForeground?: boolean
 }
 
 export type BatchedForegroundProcessOptions = {
@@ -113,6 +116,10 @@ export function resolveAgentForegroundProcessesFromIndex(
         reason: 'no_controlling_tty'
       }
     }
+    // The only host-observable "nothing is running here" signal: the terminal's foreground process
+    // group is the shell's own. Any foreground command — recognized agent or not — moves tpgid off
+    // it, so a reader may treat `false` as "busy" and must never treat absence as "idle".
+    const shellIsForeground = root.tpgid === root.pgid
     const allCandidates = rowsByOwner.get(root.pid) ?? []
     const foregroundCandidates = allCandidates.filter((row) => row.pgid === root.tpgid)
     const fallbackProcess = request.fallbackProcess
@@ -124,7 +131,7 @@ export function resolveAgentForegroundProcessesFromIndex(
         )
       : foregroundCandidates
     if (wrapperFallback && candidates.length !== 1) {
-      return { available: true, processName: null }
+      return { available: true, processName: null, shellIsForeground }
     }
     let bestCandidate: (ProcessTableRow & { depth: number }) | null = null
     let bestName: ReturnType<typeof recognizeAgentProcessFromCommandLine> = null
@@ -142,10 +149,11 @@ export function resolveAgentForegroundProcessesFromIndex(
     if (bestCandidate && bestName) {
       return {
         available: true,
-        processName: resolveOuterWrapperForegroundProcess(bestName, bestCandidate, allCandidates)
+        processName: resolveOuterWrapperForegroundProcess(bestName, bestCandidate, allCandidates),
+        shellIsForeground
       }
     }
-    return { available: true, processName: null }
+    return { available: true, processName: null, shellIsForeground }
   })
 }
 
@@ -154,7 +162,14 @@ export function toForegroundProcessEvidence(
   metadata: { authorityGeneration: string; observationEpoch: number; capturedAgeMs: number }
 ): ForegroundProcessEvidence {
   return result.available
-    ? { ...metadata, verdict: 'live', processName: result.processName }
+    ? {
+        ...metadata,
+        verdict: 'live',
+        processName: result.processName,
+        ...(result.shellIsForeground !== undefined
+          ? { shellIsForeground: result.shellIsForeground }
+          : {})
+      }
     : {
         ...metadata,
         verdict: 'unverifiable',

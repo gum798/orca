@@ -1,6 +1,7 @@
 // #9819. Every case here is the same question asked from a different angle: can this client PROVE
 // the host is holding a process nobody can reach? A "no" has to mean "leave it running".
 import { describe, expect, it } from 'vitest'
+import type { ForegroundProcessEvidence } from './foreground-process-evidence'
 import {
   planRelayPtySweep,
   RELAY_PTY_SWEEP_MAX_PER_PASS,
@@ -11,6 +12,13 @@ import {
 
 const OURS = 'client-instance-ours'
 
+const OBSERVATION = { authorityGeneration: 'gen-1', observationEpoch: 1, capturedAgeMs: 0 }
+
+/** The host looked at the pane and saw its own shell owning the terminal: nothing is running. */
+function idleShell(): ForegroundProcessEvidence {
+  return { ...OBSERVATION, verdict: 'live', processName: null, shellIsForeground: true }
+}
+
 function orphan(overrides: Partial<RelayPtyOwnershipEvidence> = {}): RelayPtyOwnershipEvidence {
   return {
     ptyId: 'pty-1',
@@ -18,6 +26,7 @@ function orphan(overrides: Partial<RelayPtyOwnershipEvidence> = {}): RelayPtyOwn
     ownerClientInstanceId: OURS,
     hostAgeMs: RELAY_PTY_SWEEP_MIN_AGE_MS * 2,
     paneBound: true,
+    foregroundProcessEvidence: idleShell(),
     ...overrides
   }
 }
@@ -27,6 +36,7 @@ function context(overrides: Partial<RelayPtySweepContext> = {}): RelayPtySweepCo
     clientInstanceId: OURS,
     isSessionOwner: true,
     routedPtyIds: new Set<string>(),
+    expiredLeasePtyIds: new Set<string>(),
     minimumHostAgeMs: RELAY_PTY_SWEEP_MIN_AGE_MS,
     ...overrides
   }
@@ -48,6 +58,76 @@ describe('planRelayPtySweep', () => {
 
     expect(plan.sweep).toEqual([])
     expect(reasonFor(plan, 'pty-1')).toBe('this client still has a route to it')
+  })
+
+  it('never sweeps a PTY whose lease this client expired without ordering a stop', () => {
+    // `expired` is what supersedeSiblingLeasesForPane, a reattach that failed on the transport, and
+    // a pane whose surface left the layout all write, and every one of them deliberately leaves the
+    // remote process running. Losing our handle is `unverifiable`; it is not abandonment.
+    const plan = planRelayPtySweep([orphan()], context({ expiredLeasePtyIds: new Set(['pty-1']) }))
+
+    expect(plan.sweep).toEqual([])
+    expect(reasonFor(plan, 'pty-1')).toBe('this client expired its lease without ordering a stop')
+  })
+
+  it('never sweeps a pane the host observes running a named foreground process', () => {
+    // The hand-launched agent: the user typed `claude` in a pane, so Orca registered no agent
+    // session and agentSessionOwners is empty. Only the host's own observation can see it.
+    const plan = planRelayPtySweep(
+      [
+        orphan({
+          foregroundProcessEvidence: {
+            ...OBSERVATION,
+            verdict: 'live',
+            processName: 'claude',
+            shellIsForeground: false
+          }
+        })
+      ],
+      context()
+    )
+
+    expect(plan.sweep).toEqual([])
+    expect(reasonFor(plan, 'pty-1')).toBe('host observes a named foreground process')
+  })
+
+  it('never sweeps a pane whose foreground group is not the shell, even unnamed', () => {
+    // A build, a test run, an editor: nothing recognizes it, but the host can still see that the
+    // terminal's foreground process group is not the shell's own.
+    const plan = planRelayPtySweep(
+      [
+        orphan({
+          foregroundProcessEvidence: {
+            ...OBSERVATION,
+            verdict: 'live',
+            processName: null,
+            shellIsForeground: false
+          }
+        })
+      ],
+      context()
+    )
+
+    expect(plan.sweep).toEqual([])
+    expect(reasonFor(plan, 'pty-1')).toBe('host does not attest an idle shell')
+  })
+
+  it('never sweeps when the host could not observe the pane at all', () => {
+    const plan = planRelayPtySweep(
+      [
+        orphan({
+          foregroundProcessEvidence: {
+            ...OBSERVATION,
+            verdict: 'unverifiable',
+            reason: 'table_unreadable'
+          }
+        })
+      ],
+      context()
+    )
+
+    expect(plan.sweep).toEqual([])
+    expect(reasonFor(plan, 'pty-1')).toBe('host could not observe the pane foreground process')
   })
 
   it('never sweeps a PTY the host attributes to another client instance', () => {
@@ -136,6 +216,29 @@ describe('planRelayPtySweep', () => {
 
       expect(plan.sweep).toEqual([])
       expect(reasonFor(plan, 'pty-1')).toBe('not a pane-bound PTY')
+    })
+
+    it('skips an entry with no foreground observation', () => {
+      const { foregroundProcessEvidence: _absent, ...legacy } = orphan()
+
+      const plan = planRelayPtySweep([legacy], context())
+
+      expect(plan.sweep).toEqual([])
+      expect(reasonFor(plan, 'pty-1')).toBe('host published no foreground-process observation')
+    })
+
+    it('skips an entry from a host that observes the pane but cannot say the shell is idle', () => {
+      const plan = planRelayPtySweep(
+        [
+          orphan({
+            foregroundProcessEvidence: { ...OBSERVATION, verdict: 'live', processName: null }
+          })
+        ],
+        context()
+      )
+
+      expect(plan.sweep).toEqual([])
+      expect(reasonFor(plan, 'pty-1')).toBe('host does not attest an idle shell')
     })
 
     it('skips an entry with no incarnation, so no stop is ever unfenced', () => {

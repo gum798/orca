@@ -5,11 +5,29 @@ import type { Store } from '../persistence'
 import type { IPtyProvider } from '../providers/types'
 import type { PtyProcessInfo } from '../providers/pty-process-info'
 import type { SshRemotePtyLease } from '../../shared/ssh-types'
-import { sweepOrphanedRelayPtys } from './ssh-orphan-relay-pty-sweep'
+import type { ForegroundProcessEvidence } from '../../shared/foreground-process-evidence'
+import type { PersistedState } from '../../shared/persisted-state-types'
+import {
+  upsertSshRemotePtyLease,
+  type SshPtyLeaseOperations
+} from '../persistence/leasing-ssh-ptys/ssh-pty-lease-operations'
+import {
+  RELAY_PTY_SWEEP_PASS_BUDGET_MS,
+  sweepOrphanedRelayPtys
+} from './ssh-orphan-relay-pty-sweep'
 import { RELAY_PTY_SWEEP_MIN_AGE_MS } from '../../shared/ssh-relay-pty-ownership-proof'
 
 const TARGET = 'target-1'
 const OURS = 'client-instance-ours'
+// A stable pane id is a UUID; anything else is stripped before supersede can match on it.
+const LEAF = '11111111-2222-4333-8444-555555555555'
+
+const OBSERVATION = { authorityGeneration: 'gen-1', observationEpoch: 1, capturedAgeMs: 0 }
+
+/** The host looked and saw its own shell owning the terminal: nothing is running in the pane. */
+function idleShell(): ForegroundProcessEvidence {
+  return { ...OBSERVATION, verdict: 'live', processName: null, shellIsForeground: true }
+}
 
 function hostEntry(overrides: Partial<PtyProcessInfo> = {}): PtyProcessInfo {
   return {
@@ -20,6 +38,7 @@ function hostEntry(overrides: Partial<PtyProcessInfo> = {}): PtyProcessInfo {
     ownerClientInstanceId: OURS,
     hostAgeMs: RELAY_PTY_SWEEP_MIN_AGE_MS * 2,
     paneBound: true,
+    foregroundProcessEvidence: idleShell(),
     ...overrides
   }
 }
@@ -65,10 +84,10 @@ describe('sweepOrphanedRelayPtys', () => {
 
     await run(harness)
 
-    expect(harness.shutdown).toHaveBeenCalledWith(`ssh:${TARGET}@@pty-1`, {
-      immediate: true,
-      expectedIncarnationId: 'inc-1'
-    })
+    expect(harness.shutdown).toHaveBeenCalledWith(
+      `ssh:${TARGET}@@pty-1`,
+      expect.objectContaining({ immediate: true, expectedIncarnationId: 'inc-1' })
+    )
   })
 
   it('leaves a PTY the caller just reattached alone', async () => {
@@ -102,6 +121,92 @@ describe('sweepOrphanedRelayPtys', () => {
     await run(harness)
 
     expect(harness.shutdown).not.toHaveBeenCalled()
+  })
+
+  it('leaves a PTY whose lease this client expired alone', async () => {
+    // The reversal this guards: supersedeSiblingLeasesForPane, dropStalePty and the missing-surface
+    // refusal all write `expired` precisely BECAUSE they will not stop the remote process.
+    const harness = createHarness([hostEntry()], [lease('pty-1', 'expired')])
+
+    await run(harness)
+
+    expect(harness.shutdown).not.toHaveBeenCalled()
+  })
+
+  it('leaves alone a lease the real supersede path expired when a pane re-leased', async () => {
+    // Drives the actual persistence operation rather than asserting the state by hand, so this
+    // stays true only while supersede really does leave the predecessor's process running.
+    const state: PersistedState = {
+      sshRemotePtyLeases: [
+        {
+          targetId: TARGET,
+          ptyId: 'pty-1',
+          state: 'attached',
+          worktreeId: 'wt-1',
+          leafId: LEAF,
+          createdAt: 1,
+          updatedAt: 1
+        }
+      ]
+    } as unknown as PersistedState
+    const operations: SshPtyLeaseOperations = {
+      state,
+      toStoredPtyId: (_targetId, ptyId) => ptyId,
+      toComparablePtyId: (_targetId, ptyId) => ptyId,
+      clearBindingsForTarget: () => {},
+      clearBindingsForLeases: () => false,
+      flush: () => {},
+      flushDurableStateOrThrowAsync: async () => {}
+    }
+    // The same pane re-leases under a new relay id; pty-1 is expired, never terminated.
+    upsertSshRemotePtyLease(operations, {
+      targetId: TARGET,
+      ptyId: 'pty-2',
+      state: 'attached',
+      worktreeId: 'wt-1',
+      leafId: LEAF
+    })
+    expect(state.sshRemotePtyLeases?.find((entry) => entry.ptyId === 'pty-1')?.state).toBe(
+      'expired'
+    )
+    const harness = createHarness([hostEntry()], state.sshRemotePtyLeases ?? [])
+
+    await run(harness)
+
+    expect(harness.shutdown).not.toHaveBeenCalled()
+  })
+
+  it('forwards the host foreground observation, so a busy pane is never swept', async () => {
+    // A `claude` the user launched by hand: Orca registered no agent session, so the entry carries
+    // no agentSessionOwners and only the host's own observation can save it.
+    const harness = createHarness([
+      hostEntry({
+        foregroundProcessEvidence: {
+          ...OBSERVATION,
+          verdict: 'live',
+          processName: 'claude',
+          shellIsForeground: false
+        }
+      })
+    ])
+
+    await run(harness)
+
+    expect(harness.shutdown).not.toHaveBeenCalled()
+  })
+
+  it('bounds the listing and every stop with one connect budget', async () => {
+    const harness = createHarness([hostEntry()])
+    const start = 1_000_000
+
+    await run(harness, { now: () => start })
+
+    const deadline = vi.mocked(harness.provider.listProcesses).mock.calls[0]?.[0]?.deadlineMs
+    expect(deadline).toBe(start + RELAY_PTY_SWEEP_PASS_BUDGET_MS)
+    expect(harness.shutdown).toHaveBeenCalledWith(
+      `ssh:${TARGET}@@pty-1`,
+      expect.objectContaining({ deadlineMs: deadline })
+    )
   })
 
   it('does sweep a PTY whose lease this client already tombstoned without an order', async () => {

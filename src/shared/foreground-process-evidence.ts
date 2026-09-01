@@ -7,7 +7,15 @@ export type ForegroundEvidenceObservation = {
 }
 
 export type ForegroundProcessEvidence =
-  | ({ verdict: 'live'; processName: string | null } & ForegroundEvidenceObservation)
+  | ({
+      verdict: 'live'
+      processName: string | null
+      /** True only when the host observed the PTY's own shell owning the terminal's foreground
+       *  process group — i.e. nothing is running in the pane. False means something IS running,
+       *  named or not. Absent from a host that predates the field, which is neither: a reader
+       *  deciding whether the pane is idle must require `true` and defer on anything else. */
+      shellIsForeground?: boolean
+    } & ForegroundEvidenceObservation)
   | ({ verdict: 'unverifiable'; reason: string } & ForegroundEvidenceObservation)
 
 export function isForegroundProcessEvidence(value: unknown): value is ForegroundProcessEvidence {
@@ -30,6 +38,9 @@ export function isForegroundProcessEvidence(value: unknown): value is Foreground
     return false
   }
   if (input.verdict === 'live') {
+    if (input.shellIsForeground !== undefined && typeof input.shellIsForeground !== 'boolean') {
+      return false
+    }
     return input.processName === null || typeof input.processName === 'string'
   }
   return (

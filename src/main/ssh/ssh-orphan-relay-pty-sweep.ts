@@ -20,21 +20,37 @@ export type SshOrphanRelayPtySweepArgs = {
   shouldContinue: () => boolean
   now?: () => number
   minimumHostAgeMs?: number
+  /** Absolute budget for the whole pass, in ms from its start. */
+  passBudgetMs?: number
 }
 
-/** Every relay PTY id this client still has a route to. Read across all lease states except the
- *  tombstones, plus the undelivered stops, which belong to the replay pass and not to this one. */
-function routedIds(args: SshOrphanRelayPtySweepArgs): Set<string> {
+/** The two client-side claims the plan needs, read in one pass over the leases.
+ *
+ *  `routed` is every relay PTY id this client still has a route to: a live lease, an id this
+ *  connect reattached, or a stop it recorded and has not delivered.
+ *
+ *  `expired` is separate on purpose. `expired` is written by four paths — a pane re-leasing under a
+ *  new relay id, a reattach that failed on the transport, a pane surface missing from the layout,
+ *  and a retired reattach — and every one of them deliberately leaves the remote process running.
+ *  Folding it into `routed` would work, but it would also lose the reason in the skip log, and this
+ *  is the distinction the sweep most needs to be able to explain. */
+function clientClaims(args: SshOrphanRelayPtySweepArgs): {
+  routed: Set<string>
+  expired: Set<string>
+} {
   const routed = new Set<string>(args.routedPtyIds)
+  const expired = new Set<string>()
   for (const lease of args.store.getSshRemotePtyLeases(args.targetId)) {
-    if (lease.state !== 'terminated' && lease.state !== 'expired') {
+    if (lease.state === 'expired') {
+      expired.add(lease.ptyId)
+    } else if (lease.state !== 'terminated') {
       routed.add(lease.ptyId)
     }
     if (lease.pendingKill) {
       routed.add(lease.ptyId)
     }
   }
-  return routed
+  return { routed, expired }
 }
 
 function toEvidence(
@@ -49,9 +65,19 @@ function toEvidence(
       : {}),
     ...(typeof process.hostAgeMs === 'number' ? { hostAgeMs: process.hostAgeMs } : {}),
     ...(typeof process.paneBound === 'boolean' ? { paneBound: process.paneBound } : {}),
-    ...(process.agentSessionOwners ? { agentSessionOwners: process.agentSessionOwners } : {})
+    ...(process.agentSessionOwners ? { agentSessionOwners: process.agentSessionOwners } : {}),
+    ...(process.foregroundProcessEvidence
+      ? { foregroundProcessEvidence: process.foregroundProcessEvidence }
+      : {})
   }
 }
+
+/** One budget for the whole pass, because this is opportunistic cleanup bolted onto the most
+ *  latency-sensitive and most failure-prone path in the app (#14830, #17830). Without it the
+ *  listing and up to eight stops inherit the mux default and connect waits on all of them.
+ *  Overrunning it yields an empty pass — the same outcome as finding nothing, never a failed
+ *  connect. */
+export const RELAY_PTY_SWEEP_PASS_BUDGET_MS = 5_000
 
 /** Stops the relay PTYs this client can prove it created and has since lost every route to.
  *
@@ -65,17 +91,21 @@ export async function sweepOrphanedRelayPtys(args: SshOrphanRelayPtySweepArgs): 
   if (!args.isSessionOwner || !args.clientInstanceId || !args.shouldContinue()) {
     return
   }
+  const now = args.now ?? Date.now
+  const deadlineMs = now() + (args.passBudgetMs ?? RELAY_PTY_SWEEP_PASS_BUDGET_MS)
   try {
-    const processes = await args.provider.listProcesses()
-    if (!args.shouldContinue()) {
+    const processes = await args.provider.listProcesses({ deadlineMs })
+    if (!args.shouldContinue() || now() >= deadlineMs) {
       return
     }
+    const claims = clientClaims(args)
     const plan = planRelayPtySweep(
       processes.map((process) => toEvidence(args.targetId, process)),
       {
         clientInstanceId: args.clientInstanceId,
         isSessionOwner: args.isSessionOwner,
-        routedPtyIds: routedIds(args),
+        routedPtyIds: claims.routed,
+        expiredLeasePtyIds: claims.expired,
         minimumHostAgeMs: args.minimumHostAgeMs ?? RELAY_PTY_SWEEP_MIN_AGE_MS
       }
     )
@@ -92,6 +122,7 @@ export async function sweepOrphanedRelayPtys(args: SshOrphanRelayPtySweepArgs): 
           // ids between the read and this call refuses the stop instead of hitting a stranger.
           await args.provider.shutdown(toAppSshPtyId(args.targetId, target.ptyId), {
             immediate: true,
+            deadlineMs,
             expectedIncarnationId: target.incarnationId
           })
           console.log(
