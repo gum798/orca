@@ -1248,6 +1248,9 @@ async function installNativeDeps(
  *
  * Why it is bounded: the remote script attempts the compile at most once per relay directory, and
  * the directory is content-hashed over the relay manifest -- so at most one compile per bundle.
+ *
+ * Why a shared cache entry never reaches here: the caller returns as soon as a linked tree probes
+ * loadable, so this only ever rewrites a `node_modules` the relay directory still owns privately.
  */
 async function applyNodePtyMasterCloexecPatch(
   conn: SshConnection,

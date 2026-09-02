@@ -23,6 +23,10 @@
  * Windows is deliberately excluded. node-pty's npm tarball ships win32 prebuilts, so there is no
  * compile to avoid there, and `node-pty-1.1.0-console-list-agent-patch.cjs` mutates the installed
  * tree in place — which rule 1 forbids for a shared one.
+ *
+ * Linux's `node-pty-1.1.0-master-cloexec-patch.cjs` also mutates in place, but it stays inside rule
+ * 1: the deploy path runs it before promotion, and returns early on a linked entry, so it only ever
+ * touches a private tree. Its bytes are in the key, so a patched build never links a pre-patch entry.
  */
 import { createHash } from 'node:crypto'
 import { RELAY_REMOTE_DIR } from './relay-protocol'
