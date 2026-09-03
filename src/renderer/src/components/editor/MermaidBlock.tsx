@@ -99,18 +99,21 @@ export default function MermaidBlock({
     }
   }, [content, htmlLabels, isDark, id])
 
-  if (error) {
-    return (
-      <div className="mermaid-block">
-        <div className="mermaid-error">
-          {translate('auto.components.editor.MermaidBlock.dcc132e691', 'Diagram error:')} {error}
-        </div>
-        <pre>
-          <code>{content}</code>
-        </pre>
-      </div>
-    )
-  }
-
-  return <div className="mermaid-block" ref={containerRef} />
+  // Why: the render target must outlive an error, or the corrected render has nowhere to draw.
+  const hasError = error !== null
+  return (
+    <div className="mermaid-block">
+      {hasError ? (
+        <>
+          <div className="mermaid-error">
+            {translate('auto.components.editor.MermaidBlock.dcc132e691', 'Diagram error:')} {error}
+          </div>
+          <pre>
+            <code>{content}</code>
+          </pre>
+        </>
+      ) : null}
+      <div ref={containerRef} hidden={hasError} />
+    </div>
+  )
 }
