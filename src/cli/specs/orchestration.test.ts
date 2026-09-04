@@ -15,3 +15,17 @@ describe('orchestration send command spec', () => {
     )
   })
 })
+
+describe('orchestration check command spec', () => {
+  it('warns that --peek and --all cannot acknowledge or drain a mailbox', () => {
+    const checkSpec = ORCHESTRATION_COMMAND_SPECS.find(
+      (spec) => spec.path.join(' ') === 'orchestration check'
+    )
+
+    expect(checkSpec?.notes).toEqual(
+      expect.arrayContaining([
+        '--peek and --all return no Delivery id, so neither can be acknowledged; to drain a mailbox, repeat plain check and --ack each Delivery until deliveryId is null.'
+      ])
+    )
+  })
+})

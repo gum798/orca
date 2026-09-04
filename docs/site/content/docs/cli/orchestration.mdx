@@ -114,7 +114,7 @@ orca orchestration dispatch --task <taskId> --to <workerHandle> --inject --json
 ## Messaging notes
 
 - Default `check` is the bound Run's oldest unacked Delivery (FIFO). Replay until `--ack`.
-- `--peek` / `--all` do not consume mail.
+- `--peek` / `--all` do not consume mail and return no Delivery id, so they cannot be acknowledged. To drain a mailbox, repeat plain `check` and `--ack` each Delivery until `deliveryId` is `null`.
 - Group addresses: `@all`, `@idle`, `@claude`, `@codex`, `@opencode`, `@gemini`, `@droid`, `@grok`, `@cursor`, `@worktree:<id>` — never for `worker_done` / heartbeat.
 - Quote PowerShell group addresses: `--to "@all"`.
 

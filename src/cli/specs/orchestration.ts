@@ -110,7 +110,8 @@ export const ORCHESTRATION_COMMAND_SPECS: CommandSpec[] = [
     notes: [
       'On Windows PowerShell, quote comma-separated type filters, e.g. --types "worker_done,escalation".',
       '--format renders the returned rows as local text only; it never writes to another terminal.',
-      'A bound Run replays the same Delivery until --ack; process every message before acknowledging.'
+      'A bound Run replays the same Delivery until --ack; process every message before acknowledging.',
+      '--peek and --all return no Delivery id, so neither can be acknowledged; to drain a mailbox, repeat plain check and --ack each Delivery until deliveryId is null.'
     ]
   },
   {
