@@ -3,6 +3,7 @@ import { OrchestrationError } from '../../orchestration/orchestration-error'
 import { buildDispatchPreamble } from '../../orchestration/preamble'
 import { resolveDispatchCreator } from './orchestration-dispatch-creator'
 import { buildInjectRejectionMessage } from './orchestration-inject-rejection-message'
+import { buildRecordOnlyDispatchWarning } from './orchestration-record-only-dispatch-warning'
 import { resolveRunScope } from './orchestration-run-scope'
 import { DispatchParams, DispatchShowParams } from './orchestration-schemas'
 
@@ -133,11 +134,11 @@ export const ORCHESTRATION_DISPATCH_METHODS: RpcMethod[] = [
         }
       }
 
+      // Why: the response is the coordinator's only chance to learn that a record-only dispatch delivered nothing; stderr is invisible under --json.
+      const warning = injected ? undefined : buildRecordOnlyDispatchWarning(to, task.id)
+      const response = { dispatch: ctx, injected, ...(warning ? { warning } : {}) }
       // Why: returnPreamble is opt-in because the preamble is several hundred bytes most callers don't need in the response.
-      if (params.returnPreamble) {
-        return { dispatch: ctx, injected, preamble }
-      }
-      return { dispatch: ctx, injected }
+      return params.returnPreamble ? { ...response, preamble } : response
     }
   }),
 

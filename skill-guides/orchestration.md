@@ -176,7 +176,7 @@ Task statuses: `pending`, `ready`, `dispatched`, `completed`, `failed`, `blocked
 Dispatch rules:
 
 - `--inject` sends the task spec plus preamble into a recognized agent CLI so it can report `worker_done`.
-- If the target is a bare shell, omit `--inject`, dispatch for tracking if needed, then send the prompt manually with `orca terminal send --terminal <handle> --text <prompt> --enter --json`.
+- If the target is a bare shell, omit `--inject`, dispatch for tracking if needed, then send the prompt manually with `orca terminal send --terminal <handle> --text <prompt> --enter --json`. A dispatch without `--inject` delivers nothing by itself; its response reports `injected: false` (newer runtimes also add a `warning` saying so).
 - After 3 consecutive failures on one task, the dispatch context circuit-breaks and the task is marked failed.
 - Use `task-list --brief --json` for coordinator sweeps; it collapses whitespace and caps each echoed spec at 160 characters (`spec_truncated` marks shortened rows). Omit `--brief` when the full spec is required, or when an older CLI rejects it as an unknown flag.
 
