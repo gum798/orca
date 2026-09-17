@@ -66,4 +66,46 @@ describe('getActiveMarkdownExportPayload', () => {
       })
     ).rejects.toThrow('Failed to inline image for PDF export')
   })
+
+  // #21198: preview renders the "Add note" control inside .markdown-body, so without scrubbing it
+  // the PDF carries a + button above every block.
+  it('drops the preview per-block annotation control', async () => {
+    const root = document.createElement('div')
+    root.innerHTML =
+      '<div class="markdown-body">' +
+      '<div class="markdown-annotation-controls">' +
+      '<button class="markdown-annotation-add" aria-label="Add note">+</button>' +
+      '</div>' +
+      '<h1>Overview</h1>' +
+      '</div>'
+
+    const payload = await getActiveMarkdownExportPayload({
+      fileId: '/repo/docs/readme.md',
+      root
+    })
+
+    expect(payload?.html).not.toContain('markdown-annotation')
+    expect(payload?.html).not.toContain('Add note')
+    expect(payload?.html).toContain('<h1>Overview</h1>')
+  })
+
+  // Why: the scrub must not reach past the affordance into the document itself.
+  it('keeps document content that sits beside the annotation control', async () => {
+    const root = document.createElement('div')
+    root.innerHTML =
+      '<div class="markdown-body">' +
+      '<p>Kept paragraph</p>' +
+      '<div class="markdown-annotation-controls"><button>+</button></div>' +
+      '<pre><code class="language-mermaid">graph TD;</code></pre>' +
+      '</div>'
+
+    const payload = await getActiveMarkdownExportPayload({
+      fileId: '/repo/docs/readme.md',
+      root
+    })
+
+    expect(payload?.html).toContain('Kept paragraph')
+    expect(payload?.html).toContain('graph TD;')
+    expect(payload?.html).not.toContain('markdown-annotation-controls')
+  })
 })

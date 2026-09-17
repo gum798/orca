@@ -22,6 +22,9 @@ const UI_ONLY_SELECTORS = [
   '.code-block-copy-btn',
   '.markdown-preview-search',
   '[class*="rich-markdown-search"]',
+  // Why: preview renders its per-block "Add note" control inside .markdown-body, so unlike the rich
+  // editor's overlay it sits within the exported subtree and prints above every block.
+  '.markdown-annotation-controls',
   '[data-orca-export-hide="true"]'
 ]
 
